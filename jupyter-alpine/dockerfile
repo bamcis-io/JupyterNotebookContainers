@@ -1,0 +1,232 @@
+FROM bamcis/ca-alpine:latest
+
+MAINTAINER Michael Haken <michael.haken@outlook.com>
+
+ARG JUPYTER_PATH="/opt/jupyter"
+ARG JUPYTER_CONFIG_DIR="/opt/jupyter/etc"
+ARG VERSION="5.5"
+ARG OPEN_CV_VERSION="3.4.1"
+
+ENV CONDA_DIR=/opt/conda \
+	PATH=/opt/conda/bin:$PATH \
+	MINICONDA_VERSION=4.5.1 \
+	JUPYTER_PATH="${JUPYTER_PATH}" \
+	JUPYTER_CONFIG_DIR="${JUPYTER_CONFIG_DIR}" \
+	ROLE="notebook" \
+	CC=/usr/bin/clang \
+	CXX=/usr/bin/clang++
+
+RUN echo '@testing http://dl-cdn.alpinelinux.org/alpine/edge/testing' >> /etc/apk/repositories \
+	&& apk update \
+	&& for ITEM in $(apk info -v | grep -e openjdk | sort -u); do \
+		echo "Deleting $ITEM"; \
+		apk del $ITEM || echo "Failed to delete $ITEM"; \
+       done \
+	&& for ITEM in $(apk info -v | grep -e java | sort -u); do \
+		echo "Deleting $ITEM"; \
+		apk del $ITEM || echo "Failted to delete $ITEM"; \
+       done \
+	#
+	# Libraries OpenCV will use
+	#
+	&& apk add --no-cache \
+		libtbb@testing \
+		libtbb-dev@testing \
+		libjpeg \
+		libjpeg-turbo-dev \
+		libpng-dev \
+		tiff-dev \
+		jasper-dev \
+		libwebp-dev \
+	#
+	# Libraries to build OpenCV
+	#
+	&& apk add --no-cache --virtual .build-opencv \
+		build-base \
+		cmake \
+		clang-dev \
+		clang \
+		make \
+		gcc \
+		g++ \
+		linux-headers \
+	#
+	# Libraries for python, numpy, scipy, and matplotlib
+	#
+	&& apk add --no-cache \
+		#
+		# For numpy
+		#
+		openblas-dev \
+		wget \
+		gfortran \
+		bash \
+		python3 \
+		python3-dev \
+		#
+		# For matplotlib
+		#
+		freetype-dev \
+		nodejs \
+	&& ln -s /usr/include/locale.h /usr/include/xlocale.h \
+	#
+	# Add OpenCV
+	#
+	# -O- output payload to stdout, and use -q to supress all wget
+	# output, so only tar file is sent down the pipeline
+	#
+	&& mkdir -p /tmp/opencv \ 
+	&& wget -qO- https://github.com/opencv/opencv/archive/${OPEN_CV_VERSION}.tar.gz \
+	#
+	# -f - specifies that the archive location is from the pipeline
+	#
+	| tar -zxv -f - --directory /tmp/opencv --strip 1 \
+	&& mkdir -p /tmp/opencv/build \
+	&& cd /tmp/opencv/build \
+	&& echo "Building opencv..." \
+	&& cmake -D CMAKE_BUILD_TYPE=RELEASE \
+		-D CMAKE_INSTALL_PREFIX=/usr \
+		-D INSTALL_C_EXAMPLES=OFF \
+		-D INSTALL_PYTHON_EXAMPLES=OFF \
+		-D WITH_FFMPEG=NO \
+		-D WITH_IPP=NO \
+		-D WITH_OPENEXR=NO \
+		-D WITH_WEBP=NO \
+		-D WITH_TIFF=NO \
+		-D WITH_JASPER=NO \
+		-D BUILD_EXAMPLES=OFF \
+		-D BUILD_PERF_TESTS=NO \
+		-D BUILD_TESTS=NO .. &> /dev/null \
+	&& make &> /dev/null \
+	&& make install &> /dev/null \
+	&& echo "Successfully installed opencv" \ 
+	&& ls /usr \
+	&& cd / \
+	&& rm -rf /tmp/opencv \
+	&& mkdir -p $JUPYTER_PATH \
+	&& mkdir -p $JUPYTER_CONFIG_DIR \
+	&& echo "export JUPYTER_PATH=${JUPYTER_PATH}" > /etc/profile.d/jupyter.sh \
+	&& echo "export JUPYTER_CONFIG_DIR=${JUPYTER_CONFIG_DIR}" >> /etc/profile.d/jupyter.sh \
+	&& pip3 install --upgrade pip 
+
+	#
+	# Install jupyter notebook
+	#
+RUN pip3 install --no-cache-dir jupyter jupyterlab jupyterhub numpy scipy matplotlib \
+    && jupyter labextension install @jupyterlab/hub-extension \
+	#
+	# Setup the JupyterHub config
+	#
+	&& mkdir -p /etc/jupyterhub \
+	&& jupyterhub --generate-config -f /etc/jupyterhub/jupyterhub_config.py \
+	#
+	# Add admin user to JupyterHub
+	#
+	&& echo "c.Authenticator.admin_users = {'jupyter'}" >> /etc/jupyterhub/jupyterhub_config.py \
+	#
+	# Create local users automatically when a hub admin creates them
+	#
+	&& echo "c.LocalAuthenticator.create_system_users = True" >> /etc/jupyterhub/jupyterhub_config.py \
+	#
+	# Peform cert setup
+	#
+	# The Server certificate request
+	#
+	&& mkdir -p ${JUPYTER_PATH}/ssl \
+	&& touch  ${JUPYTER_PATH}/ssl/server.req \
+	&& echo [ req ] >>  ${JUPYTER_PATH}/ssl/server.req \
+	&& echo prompt				= no >> ${JUPYTER_PATH}/ssl/server.req \
+	&& echo default_bits		= 2048 >> ${JUPYTER_PATH}/ssl/server.req \
+	&& echo distinguished_name	= req_distinguished_name >> ${JUPYTER_PATH}/ssl/server.req \
+	&& echo req_extensions		= req_ext >> ${JUPYTER_PATH}/ssl/server.req \
+	&& echo default_md			= sha_256 >> ${JUPYTER_PATH}/ssl/server.req \
+	#
+	# Extension to add when the -x509 option is used.
+	#
+	&& echo x509_extensions     = server_cert >> ${JUPYTER_PATH}/ssl/server.req \
+	&& echo [ req_distinguished_name ] >> ${JUPYTER_PATH}/ssl/server.req \
+	&& echo O					= bamcis.io >> ${JUPYTER_PATH}/ssl/server.req \
+	&& echo OU					= bamcis-jupyter-notebook >> ${JUPYTER_PATH}/ssl/server.req \
+	&& echo CN					= ${HOSTNAME} >> ${JUPYTER_PATH}/ssl/server.req \
+	&& echo [ server_cert ] >> ${JUPYTER_PATH}/ssl/server.req \
+	#
+	# Extensions for server certificates (man x509v3_config).
+	#
+	&& echo basicConstraints	= CA:FALSE >> ${JUPYTER_PATH}/ssl/server.req \
+	&& echo nsCertType			= server >> ${JUPYTER_PATH}/ssl/server.req \
+	&& echo nsComment			= \"OpenSSL Generated Server Certificate\" >> ${JUPYTER_PATH}/ssl/server.req \
+	&& echo subjectKeyIdentifier = hash >> ${JUPYTER_PATH}/ssl/server.req \
+	&& echo authorityKeyIdentifier = keyid,issuer:always >> ${JUPYTER_PATH}/ssl/server.req \
+	&& echo keyUsage = critical, digitalSignature, keyEncipherment >> ${JUPYTER_PATH}/ssl/server.req \
+	&& echo extendedKeyUsage	= serverAuth >> ${JUPYTER_PATH}/ssl/server.req \
+	&& echo [ req_ext ] >> ${JUPYTER_PATH}/ssl/server.req \
+	&& echo subjectAltName		= @alt_names >> ${JUPYTER_PATH}/ssl/server.req \
+	&& echo [ alt_names ] >> ${JUPYTER_PATH}/ssl/server.req \
+	&& echo DNS.1 = ${HOSTNAME} >> ${JUPYTER_PATH}/ssl/server.req \
+	#
+	# Creates a new certificate request and private key that is not password protected (-nodes)
+	#
+	&& openssl req -newkey rsa:2048 -days 3650 -nodes -config ${JUPYTER_PATH}/ssl/server.req \
+		-keyout ${JUPYTER_PATH}/ssl/server-key.pem -out ${JUPYTER_PATH}/ssl/server-req.pem \	
+	#
+	# Process the server key, the key was originally written in PKCS#8 Private-Key Information Syntax Standard
+	# and converts it to a PKCS#1 format, an RSA PRIVATE KEY
+	#
+	&& openssl rsa -in ${JUPYTER_PATH}/ssl/server-key.pem -out ${JUPYTER_PATH}/ssl/server-key.pem \
+	&& chmod 0400 ${JUPYTER_PATH}/ssl/server-key.pem \
+	#
+	# Make sure all environment variables are loaded
+	#
+	&& source /root/.bashrc \
+	#
+	# Sign the server certificate
+	#
+	&& openssl x509 -req -in ${JUPYTER_PATH}/ssl/server-req.pem -days 3650 -extfile ${JUPYTER_PATH}/ssl/server.req \
+		-extensions server_cert -CA "${CA_CERT}" -CAkey "${CA_KEY}" \
+		-passin "pass:${CA_PRIVATE_KEY_PASSWORD}" -set_serial 01 -out ${JUPYTER_PATH}/ssl/server-cert.pem \
+	&& chmod 0444 ${JUPYTER_PATH}/ssl/server-cert.pem \
+	#
+	# Make sure path includes everything for new users
+	#
+	&& echo "PATH=${PATH}" >> /etc/profile \
+	#
+	# Add the group and user for running the jupyter services
+	#
+	&& addgroup -S jupyter \
+	#
+	# -S = system
+	# -G = add to existing group
+	# -s = shell
+	# -D = don't assign password
+	# -g = GECOS
+	# -h = home directory
+	# -H = don't create home directory
+	# -u = User id
+	# -k = skeleton directory
+	#
+	&& adduser -S -G jupyter -h /home/jupyter -s /bin/bash -D jupyter \
+	&& mkdir -p "/home/jupyter/notebooks" \
+	&& chown --recursive jupyter "/home/jupyter" \
+	#
+	# Make sure jupyter user owns the jupyter paths
+	#
+	&& chown --recursive jupyter:jupyter ${JUPYTER_PATH} \
+	&& chown --recursive jupyter:jupyter ${JUPYTER_CONFIG_DIR} \
+	#
+	# Delete the config file
+	#
+	&& rm -f ${JUPYTER_PATH}/ssl/server.req \
+	#
+	# Delete the signing request
+	#
+	&& rm -f ${JUPYTER_PATH}/ssl/server-req.pem \
+	#
+	# Cleanup
+	#
+	&& apk del .build-opencv
+
+COPY entrypoint.sh /tmp/entrypoint.sh
+
+EXPOSE 8888 8081
+
+ENTRYPOINT ["/tmp/entrypoint.sh"]

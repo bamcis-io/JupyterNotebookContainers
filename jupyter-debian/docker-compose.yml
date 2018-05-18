@@ -1,0 +1,13 @@
+version: '3.6'
+
+services:
+  jupyter:
+    image: bamcis/jupyter-debian:latest
+    container_name: jupyter
+    environment:
+      ROLE: notebook
+    ports:
+    - 8888:8888
+    - 8081:8081
+    networks:
+    - default
